@@ -1,0 +1,16 @@
+[project]
+name = "rag-pdf-bot"
+version = "0.1.0"
+dependencies = [
+    "openai",
+    "langchain",
+    "langchain-community",
+    "pdfminer.six",
+    "faiss-cpu",
+    "sentence-transformers",
+    "gradio",
+    "tiktoken",
+    "python-dotenv",
+    "ipykernel",
+    "pip"
+]
