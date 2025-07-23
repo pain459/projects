@@ -8,8 +8,8 @@ import numpy as np
 
 from pdfminer.high_level import extract_text
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.chat_models import ChatOpenAI
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.chat_models import ChatOpenAI
 from langchain.schema import HumanMessage
 from langchain_community.vectorstores import FAISS
 

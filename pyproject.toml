@@ -2,15 +2,18 @@
 name = "rag-pdf-bot"
 version = "0.1.0"
 dependencies = [
-    "openai",
-    "langchain",
-    "langchain-community",
-    "pdfminer.six",
-    "faiss-cpu",
-    "sentence-transformers",
-    "gradio",
-    "tiktoken",
-    "python-dotenv",
-    "ipykernel",
-    "pip"
+    "openai",                        # For OpenAI LLM and embeddings
+    "langchain",                    # Core LangChain framework
+    "langchain-community",         # Additional integrations (like PDF/Text loaders)
+    "pdfminer.six",                # PDF parsing
+    "faiss-cpu",                   # FAISS vector index
+    "sentence-transformers",       # For potential local embedding use
+    "gradio",                      # Frontend UI
+    "tiktoken",                    # Tokenizer for OpenAI
+    "python-dotenv",               # Environment variable management
+    "ipykernel",                   # Jupyter support
+    "pip",                         # Ensure pip is available
+    "pypdf",                       # Optional: better PDF support in some cases
+    "transformers",                # For local LLM support (e.g., Hugging Face models)
+    "accelerate"                   # For fast inference with local LLMs
 ]
