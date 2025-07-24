@@ -148,20 +148,23 @@ def query_lm_studio(context, question):
 
 
 # ----------------- QUERY HANDLER -----------------
-def answer_query(query, vectorstore, llm_chain=None):
+def answer_query(query, vectorstore, llm_chain=None, chat_history=None):
     formatted_query = "query: " + query  # BGE-specific
     docs = vectorstore.similarity_search(formatted_query, k=10)
     context = truncate_context(docs, MAX_TOKENS_FOR_CONTEXT)
 
+    # --- Append recent history to the context ---
+    if chat_history:
+        history_context = "\n".join([f"User: {q}\nThoth: {a}" for q, a in chat_history[-3:]])
+        context = f"{history_context}\n\n{context}"
+
     if USE_LOCAL_LLM:
         result_text = query_lm_studio(context, query)
     else:
-        result = llm_chain.invoke({"context": context, "question": query})
-        result_text = result["text"]
+        result = llm_chain.invoke({"context": context, "question": query})["text"]
 
-    sources = "\n".join(set(doc.metadata.get("source", "Unknown") for doc in docs))
-    # return f"**Answer:** {result_text}\n\nSources:\n{sources}"
-    return f"**Answer:** {result_text}"
+    return result_text
+
 
 # ----------------- INIT -----------------
 embedding_model = get_local_embedding_model()
@@ -170,28 +173,57 @@ llm_chain = setup_llm_chain() if not USE_LOCAL_LLM else None
 
 # ----------------- GRADIO UI -----------------
 def chat_interface(message, chat_history):
-    response = answer_query(message, vectorstore, llm_chain)
+    response = answer_query(message, vectorstore, llm_chain, chat_history)
     chat_history.append((message, response))
-    return "", chat_history
+    return "", chat_history, chat_history  # <-- now returns 3 items
+
 
 with gr.Blocks(css=".gr-chatbot {height: 600px} .gr-textbox {font-size: 16px}") as server:
     gr.Markdown("## 🤖 THOTH - SRE bot", elem_id="title")
 
-    with gr.Row(elem_id="chat-row"):
-        with gr.Column(scale=1):
-            gr.Markdown("")  # left spacer
-        with gr.Column(scale=6):
-            chatbot = gr.Chatbot(label="Thoth", height=600)
-            msg = gr.Textbox(label="Your question", placeholder="All things SRE")
-            with gr.Row():
-                clear = gr.Button("Clear", variant="stop")
-        with gr.Column(scale=1):
-            gr.Markdown("")  # right spacer
+    with gr.Row():
+        new_chat = gr.Button("🆕 New Chat")
+        clear = gr.Button("🧹 Clear Chat", variant="stop")
 
+    with gr.Row(elem_id="chat-row"):
+        chatbot = gr.Chatbot(label="Thoth", height=600, type="tuples")
+    msg = gr.Textbox(label="Your question", placeholder="All things SRE")
+
+    chat_history_io = gr.Textbox(visible=False)  # for JS sync
     state = gr.State([])
 
-    msg.submit(chat_interface, [msg, state], [msg, chatbot])
-    clear.click(lambda: ([], "", []), None, [chatbot, msg, state])
+    msg.submit(chat_interface, [msg, state], [msg, chatbot, chat_history_io])
+    new_chat.click(lambda: ([], "", [], "[]"), None, [chatbot, msg, state, chat_history_io])
+    clear.click(lambda: ([], "", [], "[]"), None, [chatbot, msg, state, chat_history_io])
+
+    def restore_from_local(io_str):
+        import json
+        try:
+            history = json.loads(io_str) if io_str else []
+            return history, history
+        except:
+            return [], []
+
+    server.load(restore_from_local, inputs=[chat_history_io], outputs=[chatbot, state])
+
+    gr.HTML("""
+    <script>
+    function saveChat(history) {
+        localStorage.setItem("thoth_chat", JSON.stringify(history));
+    }
+
+    function loadChat() {
+        const saved = localStorage.getItem("thoth_chat");
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            document.querySelector('textarea[aria-label="chat_history_io"]').value = JSON.stringify(parsed);
+        }
+    }
+    window.addEventListener('load', loadChat);
+    </script>
+    """)
+
+
 
 
 server.launch()
