@@ -1,6 +1,5 @@
 import os
 import gradio as gr
-import requests
 from typing import List
 from dotenv import load_dotenv
 
@@ -13,13 +12,14 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain_community.chat_models import ChatOpenAI
 
-import tiktoken
+import tiktoken  # for token counting
 
-# ----------------- CONFIG -----------------
+# ----------------- ENV SETUP -----------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
+# ----------------- CONFIG -----------------
 DOCS_FOLDER = "docs"
 INDEX_PATH = "faiss_index_local"
 EMBED_MODEL_NAME = "BAAI/bge-large-en"
@@ -27,10 +27,7 @@ CHUNK_SIZE = 512
 CHUNK_OVERLAP = 100
 MAX_TOKENS_FOR_CONTEXT = 1500
 
-USE_LOCAL_LLM = True  # Toggle between OpenAI (False) and LM Studio (True)
-LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
-
-# ----------------- LOADING DOCS -----------------
+# ----------------- LOAD & EMBED -----------------
 def load_documents(folder_path: str) -> List[Document]:
     documents = []
     for filename in os.listdir(folder_path):
@@ -68,7 +65,22 @@ def create_or_load_faiss(embedding_model):
         print("Loading existing FAISS index...")
     return FAISS.load_local(INDEX_PATH, embedding_model, allow_dangerous_deserialization=True)
 
-# ----------------- TOKEN MGMT -----------------
+# ----------------- LLM & CHAIN -----------------
+def setup_llm_chain():
+    template = """
+You are a helpful assistant. Use ONLY the context below to answer the question.
+If the answer is not in the context, reply "I don't know."
+
+Context:
+{context}
+
+Question:
+{question}
+"""
+    prompt = PromptTemplate(input_variables=["context", "question"], template=template)
+    llm = ChatOpenAI(temperature=0.0)
+    return LLMChain(llm=llm, prompt=prompt)
+
 def count_tokens(text: str, model_name="gpt-4o-mini") -> int:
     enc = tiktoken.encoding_for_model(model_name)
     return len(enc.encode(text))
@@ -148,30 +160,26 @@ def query_lm_studio(context, question):
 
 
 # ----------------- QUERY HANDLER -----------------
-def answer_query(query, vectorstore, llm_chain=None, chat_history=None):
+def answer_query(query, vectorstore, llm_chain=None):
     formatted_query = "query: " + query  # BGE-specific
     docs = vectorstore.similarity_search(formatted_query, k=10)
     context = truncate_context(docs, MAX_TOKENS_FOR_CONTEXT)
 
-    # --- Append recent history to the context ---
-    if chat_history:
-        history_context = "\n".join([f"User: {q}\nThoth: {a}" for q, a in chat_history[-3:]])
-        context = f"{history_context}\n\n{context}"
-
     if USE_LOCAL_LLM:
         result_text = query_lm_studio(context, query)
     else:
-        result = llm_chain.invoke({"context": context, "question": query})["text"]
+        result = llm_chain.invoke({"context": context, "question": query})
+        result_text = result["text"]
 
-    return result_text
-
-
-# ----------------- INIT -----------------
-embedding_model = get_local_embedding_model()
-vectorstore = create_or_load_faiss(embedding_model)
-llm_chain = setup_llm_chain() if not USE_LOCAL_LLM else None
+    sources = "\n".join(set(doc.metadata.get("source", "Unknown") for doc in docs))
+    # return f"**Answer:** {result_text}\n\nSources:\n{sources}"
+    return f"**Answer:** {result_text}"
 
 # ----------------- GRADIO UI -----------------
+embedding_model = get_local_embedding_model()
+vectorstore = create_or_load_faiss(embedding_model)
+llm_chain = setup_llm_chain()
+
 def chat_interface(message, chat_history):
     response = answer_query(message, vectorstore, llm_chain, chat_history)
     chat_history.append((message, response))
@@ -181,15 +189,17 @@ def chat_interface(message, chat_history):
 with gr.Blocks(css=".gr-chatbot {height: 600px} .gr-textbox {font-size: 16px}") as server:
     gr.Markdown("## 🤖 THOTH - SRE bot", elem_id="title")
 
-    with gr.Row():
-        new_chat = gr.Button("🆕 New Chat")
-        clear = gr.Button("🧹 Clear Chat", variant="stop")
-
     with gr.Row(elem_id="chat-row"):
-        chatbot = gr.Chatbot(label="Thoth", height=600, type="tuples")
-    msg = gr.Textbox(label="Your question", placeholder="All things SRE")
+        with gr.Column(scale=1):
+            gr.Markdown("")  # left spacer
+        with gr.Column(scale=6):
+            chatbot = gr.Chatbot(label="Thoth", height=600)
+            msg = gr.Textbox(label="Your question", placeholder="All things SRE")
+            with gr.Row():
+                clear = gr.Button("Clear", variant="stop")
+        with gr.Column(scale=1):
+            gr.Markdown("")  # right spacer
 
-    chat_history_io = gr.Textbox(visible=False)  # for JS sync
     state = gr.State([])
 
     msg.submit(chat_interface, [msg, state], [msg, chatbot, chat_history_io])
@@ -222,7 +232,6 @@ with gr.Blocks(css=".gr-chatbot {height: 600px} .gr-textbox {font-size: 16px}") 
     window.addEventListener('load', loadChat);
     </script>
     """)
-
 
 
 
