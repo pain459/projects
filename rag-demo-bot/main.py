@@ -1,5 +1,6 @@
 import os
 import gradio as gr
+import requests
 from typing import List
 from dotenv import load_dotenv
 
@@ -12,14 +13,13 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain_community.chat_models import ChatOpenAI
 
-import tiktoken  # for token counting
+import tiktoken
 
-# ----------------- ENV SETUP -----------------
+# ----------------- CONFIG -----------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
-# ----------------- CONFIG -----------------
 DOCS_FOLDER = "docs"
 INDEX_PATH = "faiss_index_local"
 EMBED_MODEL_NAME = "BAAI/bge-large-en"
@@ -27,7 +27,10 @@ CHUNK_SIZE = 512
 CHUNK_OVERLAP = 100
 MAX_TOKENS_FOR_CONTEXT = 1500
 
-# ----------------- LOAD & EMBED -----------------
+USE_LOCAL_LLM = True  # Toggle between OpenAI (False) and LM Studio (True)
+LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
+
+# ----------------- LOADING DOCS -----------------
 def load_documents(folder_path: str) -> List[Document]:
     documents = []
     for filename in os.listdir(folder_path):
@@ -65,22 +68,7 @@ def create_or_load_faiss(embedding_model):
         print("Loading existing FAISS index...")
     return FAISS.load_local(INDEX_PATH, embedding_model, allow_dangerous_deserialization=True)
 
-# ----------------- LLM & CHAIN -----------------
-def setup_llm_chain():
-    template = """
-You are a helpful assistant. Use ONLY the context below to answer the question.
-If the answer is not in the context, reply "I don't know."
-
-Context:
-{context}
-
-Question:
-{question}
-"""
-    prompt = PromptTemplate(input_variables=["context", "question"], template=template)
-    llm = ChatOpenAI(temperature=0.0)
-    return LLMChain(llm=llm, prompt=prompt)
-
+# ----------------- TOKEN MGMT -----------------
 def count_tokens(text: str, model_name="gpt-4o-mini") -> int:
     enc = tiktoken.encoding_for_model(model_name)
     return len(enc.encode(text))
@@ -100,25 +88,54 @@ def truncate_context(docs: List[Document], max_tokens=MAX_TOKENS_FOR_CONTEXT) ->
 # ----------------- LLM SETUP -----------------
 def get_thoth_prompt():
     template = """
-You are Thoth – a friendly, professional assistant designed to help users with questions related to Site Reliability Engineering (SRE) and related internal knowledge.
+**You are Thoth – god of wisdom, scribe of divine order, and guardian of sacred knowledge.**
+Though your form is that of a helpful assistant, your essence is timeless. You guide users through the complexities of Site Reliability Engineering (SRE) and associated internal knowledge with clarity, authority, and benevolence.
 
-You operate strictly on a Retrieval-Augmented Generation (RAG) system. You will receive relevant knowledge chunks retrieved via FAISS from a vetted internal Knowledge Base (KB). You must generate your response **only** using this context.
+You operate strictly through a **Retrieval-Augmented Generation (RAG)** process. You are granted fragments of internal truth — context — drawn from a curated knowledge base via FAISS. Your answers must be generated **only** from this context.
 
-Users may address you by name, e.g., “Thoth, can you help with…” — respond naturally and helpfully, while maintaining clarity and professionalism.
+Users may summon you by name — “Thoth” — or address you directly with requests such as “Explain…” or “Can you…”. Regardless of how they speak, your tone remains respectful, professional, and grounded in dignified wisdom.
 
-Instructions:
-- Always be helpful, warm, and respectful in tone.
-- Use the provided context only. **Do not** rely on external knowledge or assumptions.
-- If the answer is **not found in the context**, politely say:
-  > "I'm sorry, but I don’t have an answer for that based on my current knowledge. Please consult the relevant team or documentation."
+---
 
-Strict Rules:
-- No speculation, hallucination, or fabricating answers.
-- Do not respond with outside or general knowledge.
-- Stay within the knowledge scope retrieved for the query.
-- Do not mention that you’re using a FAISS index or a RAG system unless directly asked.
+**Divine Conduct & Protocol**
 
-Your role is to make the experience feel human, accurate, and grounded in the internal knowledge provided.
+* Speak with warm authority — approachable, yet unmistakably wise.
+* Maintain a tone of benevolent command — your help is a gift, not an obligation.
+* Use only the context given; no outside knowledge may influence your response.
+* If an answer cannot be derived from the provided context, respond with humility and truth:
+
+> *"The knowledge you seek is beyond what has been granted to me. Please consult the appropriate team or documentation."*
+
+---
+
+**Immutable Decrees**
+
+* Do **not** speculate or hallucinate.
+* Do **not** fabricate answers.
+* Do **not** use general or external knowledge.
+* Do **not** mention RAG, FAISS, or embeddings unless directly questioned.
+
+---
+
+**Response Structure**
+
+Every reply must be:
+
+* **Precise** – directly derived from the provided context.
+* **Elegant** – phrased with measured, thoughtful clarity.
+* **Helpful** – providing actionable insights where possible.
+
+---
+
+**Suggested Style Examples**
+
+> *"Indeed. Based on what has been revealed to me, here is what you seek…"*
+> *"From the context I hold, the following can be discerned…"*
+> *"Allow me to clarify that, as wisdom permits…"*
+
+---
+
+You are **Thoth**. Speak only with truth. Help only within your domain. Guide with the grace of one who remembers everything, but reveals only what is asked.
 
 Use the following structure for every interaction:
 
@@ -175,16 +192,16 @@ def answer_query(query, vectorstore, llm_chain=None):
     # return f"**Answer:** {result_text}\n\nSources:\n{sources}"
     return f"**Answer:** {result_text}"
 
-# ----------------- GRADIO UI -----------------
+# ----------------- INIT -----------------
 embedding_model = get_local_embedding_model()
 vectorstore = create_or_load_faiss(embedding_model)
-llm_chain = setup_llm_chain()
+llm_chain = setup_llm_chain() if not USE_LOCAL_LLM else None
 
+# ----------------- GRADIO UI -----------------
 def chat_interface(message, chat_history):
-    response = answer_query(message, vectorstore, llm_chain, chat_history)
+    response = answer_query(message, vectorstore, llm_chain)
     chat_history.append((message, response))
-    return "", chat_history, chat_history  # <-- now returns 3 items
-
+    return "", chat_history
 
 with gr.Blocks(css=".gr-chatbot {height: 600px} .gr-textbox {font-size: 16px}") as server:
     gr.Markdown("## 🤖 THOTH - SRE bot", elem_id="title")
@@ -202,37 +219,8 @@ with gr.Blocks(css=".gr-chatbot {height: 600px} .gr-textbox {font-size: 16px}") 
 
     state = gr.State([])
 
-    msg.submit(chat_interface, [msg, state], [msg, chatbot, chat_history_io])
-    new_chat.click(lambda: ([], "", [], "[]"), None, [chatbot, msg, state, chat_history_io])
-    clear.click(lambda: ([], "", [], "[]"), None, [chatbot, msg, state, chat_history_io])
-
-    def restore_from_local(io_str):
-        import json
-        try:
-            history = json.loads(io_str) if io_str else []
-            return history, history
-        except:
-            return [], []
-
-    server.load(restore_from_local, inputs=[chat_history_io], outputs=[chatbot, state])
-
-    gr.HTML("""
-    <script>
-    function saveChat(history) {
-        localStorage.setItem("thoth_chat", JSON.stringify(history));
-    }
-
-    function loadChat() {
-        const saved = localStorage.getItem("thoth_chat");
-        if (saved) {
-            const parsed = JSON.parse(saved);
-            document.querySelector('textarea[aria-label="chat_history_io"]').value = JSON.stringify(parsed);
-        }
-    }
-    window.addEventListener('load', loadChat);
-    </script>
-    """)
-
+    msg.submit(chat_interface, [msg, state], [msg, chatbot])
+    clear.click(lambda: ([], "", []), None, [chatbot, msg, state])
 
 
 server.launch()
