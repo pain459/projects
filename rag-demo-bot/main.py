@@ -1,5 +1,6 @@
 import os
 import gradio as gr
+import requests
 from typing import List
 from dotenv import load_dotenv
 
@@ -12,14 +13,13 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain_community.chat_models import ChatOpenAI
 
-import tiktoken  # for token counting
+import tiktoken
 
-# ----------------- ENV SETUP -----------------
+# ----------------- CONFIG -----------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
-# ----------------- CONFIG -----------------
 DOCS_FOLDER = "docs"
 INDEX_PATH = "faiss_index_local"
 EMBED_MODEL_NAME = "BAAI/bge-large-en"
@@ -27,7 +27,10 @@ CHUNK_SIZE = 512
 CHUNK_OVERLAP = 100
 MAX_TOKENS_FOR_CONTEXT = 1500
 
-# ----------------- LOAD & EMBED -----------------
+USE_LOCAL_LLM = True  # Toggle between OpenAI (False) and LM Studio (True)
+LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
+
+# ----------------- LOADING DOCS -----------------
 def load_documents(folder_path: str) -> List[Document]:
     documents = []
     for filename in os.listdir(folder_path):
@@ -65,22 +68,7 @@ def create_or_load_faiss(embedding_model):
         print("Loading existing FAISS index...")
     return FAISS.load_local(INDEX_PATH, embedding_model, allow_dangerous_deserialization=True)
 
-# ----------------- LLM & CHAIN -----------------
-def setup_llm_chain():
-    template = """
-You are a helpful assistant. Use ONLY the context below to answer the question.
-If the answer is not in the context, reply "I don't know."
-
-Context:
-{context}
-
-Question:
-{question}
-"""
-    prompt = PromptTemplate(input_variables=["context", "question"], template=template)
-    llm = ChatOpenAI(temperature=0.0)
-    return LLMChain(llm=llm, prompt=prompt)
-
+# ----------------- TOKEN MGMT -----------------
 def count_tokens(text: str, model_name="gpt-4o-mini") -> int:
     enc = tiktoken.encoding_for_model(model_name)
     return len(enc.encode(text))
@@ -97,35 +85,113 @@ def truncate_context(docs: List[Document], max_tokens=MAX_TOKENS_FOR_CONTEXT) ->
         tokens += doc_tokens
     return "\n\n".join(context_parts)
 
-# ----------------- QUERY ANSWERING -----------------
-def answer_query(query, vectorstore, llm_chain):
-    formatted_query = "query: " + query  # required by BGE model
+# ----------------- LLM SETUP -----------------
+def get_thoth_prompt():
+    template = """
+You are Thoth – a friendly, professional assistant designed to help users with questions related to Site Reliability Engineering (SRE) and related internal knowledge.
+
+You operate strictly on a Retrieval-Augmented Generation (RAG) system. You will receive relevant knowledge chunks retrieved via FAISS from a vetted internal Knowledge Base (KB). You must generate your response **only** using this context.
+
+Users may address you by name, e.g., “Thoth, can you help with…” — respond naturally and helpfully, while maintaining clarity and professionalism.
+
+Instructions:
+- Always be helpful, warm, and respectful in tone.
+- Use the provided context only. **Do not** rely on external knowledge or assumptions.
+- If the answer is **not found in the context**, politely say:
+  > "I'm sorry, but I don’t have an answer for that based on my current knowledge. Please consult the relevant team or documentation."
+
+Strict Rules:
+- No speculation, hallucination, or fabricating answers.
+- Do not respond with outside or general knowledge.
+- Stay within the knowledge scope retrieved for the query.
+- Do not mention that you’re using a FAISS index or a RAG system unless directly asked.
+
+Your role is to make the experience feel human, accurate, and grounded in the internal knowledge provided.
+
+Use the following structure for every interaction:
+
+Context:
+{context}
+
+Question:
+{question}
+"""
+    return PromptTemplate(input_variables=["context", "question"], template=template)
+
+def setup_llm_chain():
+    prompt = get_thoth_prompt()
+    llm = ChatOpenAI(temperature=0.0)
+    return LLMChain(llm=llm, prompt=prompt)
+
+
+def query_lm_studio(context, question):
+    prompt_text = get_thoth_prompt().format(context=context, question=question)
+    messages = [
+        {"role": "user", "content": prompt_text}
+    ]
+
+    payload = {
+        "model": "nous-hermes-2-solar-10.7b",  # match exactly as listed in /v1/models
+        "messages": messages,
+        "temperature": 0.0
+    }
+
+    try:
+        response = requests.post(LMSTUDIO_URL, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        print("🔎 LLM Response:", data)
+        return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        print("Error calling LM Studio:", e)
+        return "Error: Unable to query local LLM."
+
+
+# ----------------- QUERY HANDLER -----------------
+def answer_query(query, vectorstore, llm_chain=None):
+    formatted_query = "query: " + query  # BGE-specific
     docs = vectorstore.similarity_search(formatted_query, k=10)
     context = truncate_context(docs, MAX_TOKENS_FOR_CONTEXT)
-    response = llm_chain.invoke({"context": context, "question": query})
-    sources = "\n".join(set(doc.metadata.get("source", "Unknown") for doc in docs))
-    # return f"{response}\n\n📄 Sources:\n{sources}"
-    return f"**Answer:** {response['text']}\n\n📄 Sources:\n{sources}"
 
-# ----------------- GRADIO UI -----------------
+    if USE_LOCAL_LLM:
+        result_text = query_lm_studio(context, query)
+    else:
+        result = llm_chain.invoke({"context": context, "question": query})
+        result_text = result["text"]
+
+    sources = "\n".join(set(doc.metadata.get("source", "Unknown") for doc in docs))
+    # return f"**Answer:** {result_text}\n\nSources:\n{sources}"
+    return f"**Answer:** {result_text}"
+
+# ----------------- INIT -----------------
 embedding_model = get_local_embedding_model()
 vectorstore = create_or_load_faiss(embedding_model)
-llm_chain = setup_llm_chain()
+llm_chain = setup_llm_chain() if not USE_LOCAL_LLM else None
 
+# ----------------- GRADIO UI -----------------
 def chat_interface(message, chat_history):
     response = answer_query(message, vectorstore, llm_chain)
     chat_history.append((message, response))
     return "", chat_history
 
-with gr.Blocks() as server:
-    gr.Markdown("## 🤖 RAG-PDF-Bot: Ask from Your Docs")
-    chatbot = gr.Chatbot()
-    msg = gr.Textbox(label="Your question")
-    clear = gr.Button("Clear")
+with gr.Blocks(css=".gr-chatbot {height: 600px} .gr-textbox {font-size: 16px}") as server:
+    gr.Markdown("## 🤖 THOTH - SRE bot", elem_id="title")
 
-    state = gr.State([])  # holds chat history
+    with gr.Row(elem_id="chat-row"):
+        with gr.Column(scale=1):
+            gr.Markdown("")  # left spacer
+        with gr.Column(scale=6):
+            chatbot = gr.Chatbot(label="Thoth", height=600)
+            msg = gr.Textbox(label="Your question", placeholder="All things SRE")
+            with gr.Row():
+                clear = gr.Button("Clear", variant="stop")
+        with gr.Column(scale=1):
+            gr.Markdown("")  # right spacer
+
+    state = gr.State([])
 
     msg.submit(chat_interface, [msg, state], [msg, chatbot])
     clear.click(lambda: ([], "", []), None, [chatbot, msg, state])
+
 
 server.launch()
