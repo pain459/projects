@@ -33,7 +33,7 @@ CHUNK_SIZE = 512
 CHUNK_OVERLAP = 100
 MAX_TOKENS_FOR_CONTEXT = 1500
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
-USE_LOCAL_LLM = True
+USE_LOCAL_LLM = False
 USE_EVALUATOR = True
 LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
 INDEX_TRACKER = "indexed_docs.json"
@@ -311,4 +311,4 @@ with gr.Blocks(css=".gr-chatbot {height: 600px} .gr-textbox {font-size: 16px}") 
     msg.submit(chat_interface, [msg, state], [msg, chatbot])
     clear.click(lambda: ([], "", []), None, [chatbot, msg, state])
 
-server.launch()
+server.launch(share=True)
