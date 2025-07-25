@@ -12,6 +12,7 @@ from langchain_community.vectorstores import FAISS
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain_community.chat_models import ChatOpenAI
+from openai import OpenAI
 
 import tiktoken
 
@@ -28,6 +29,7 @@ CHUNK_OVERLAP = 100
 MAX_TOKENS_FOR_CONTEXT = 1500
 
 USE_LOCAL_LLM = True  # Toggle between OpenAI (False) and LM Studio (True)
+USE_EVALUATOR = True
 LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
 
 # ----------------- LOADING DOCS -----------------
@@ -180,19 +182,76 @@ def query_lm_studio(context, question):
 
 # ----------------- QUERY HANDLER -----------------
 def answer_query(query, vectorstore, llm_chain=None):
-    formatted_query = "query: " + query  # BGE-specific
+    formatted_query = "query: " + query
     docs = vectorstore.similarity_search(formatted_query, k=10)
     context = truncate_context(docs, MAX_TOKENS_FOR_CONTEXT)
 
     if USE_LOCAL_LLM:
         result_text = query_lm_studio(context, query)
+        if USE_EVALUATOR:
+            evaluation = evaluate_with_gemini_flash(query, result_text)
+            result_text += f"\n\n---\n🧠 Gemini Evaluation:\n{evaluation}"
     else:
         result = llm_chain.invoke({"context": context, "question": query})
         result_text = result["text"]
 
     sources = "\n".join(set(doc.metadata.get("source", "Unknown") for doc in docs))
-    # return f"**Answer:** {result_text}\n\nSources:\n{sources}"
     return f"**Answer:** {result_text}"
+
+
+# ---------------- EVALUATOR -----------------------
+
+def evaluate_with_gemini_flash(prompt: str, response: str) -> str:
+    try:
+        google_api_key = os.getenv("GOOGLE_API_KEY")  # Ensure this is set in .env
+        if not google_api_key:
+            return "⚠️ Gemini evaluation skipped (API key not set)."
+
+        gemini = OpenAI(
+            api_key=google_api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+        )
+        model_name = "gemini-2.0-flash"
+
+        eval_messages = [
+            {"role": "system", "content": "You are an evaluator of assistant responses."},
+            {
+                "role": "user",
+                "content": f"""
+Evaluate if the assistant's response is accurate, aligned to the query, and not hallucinated.
+Remmeber, assistant have a personality all the time.
+If acceptable, respond with:
+
+✅ Valid
+
+If problematic, respond with:
+
+⚠️ Invalid - <brief reason>
+
+---
+
+Query:
+{prompt}
+
+Response:
+{response}
+"""
+            }
+        ]
+
+        response = gemini.chat.completions.create(
+            model=model_name,
+            messages=eval_messages,
+            temperature=0.0,
+        )
+
+        answer = response.choices[0].message.content.strip()
+        return answer
+
+    except Exception as e:
+        return f"⚠️ Gemini evaluation failed: {e}"
+
+
 
 # ----------------- INIT -----------------
 embedding_model = get_local_embedding_model()
