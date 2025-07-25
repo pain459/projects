@@ -16,9 +16,18 @@ genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 
 # -------------------------
-# 🧠 Step 1: Planner Agent
+# Step 1: Planner Agent
 # -------------------------
 def plan_task_with_llm(goal: str) -> str:
+    """
+    Generates a task plan using OpenAI's GPT model.
+
+    Args:
+        goal (str): The high-level goal to be broken down into subtasks.
+
+    Returns:
+        str: A JSON string representing the task plan.
+    """
     prompt = f"""
 You are a task planner agent. Break the following high-level goal into 3–5 clear, ordered subtasks.
 
@@ -42,9 +51,19 @@ Format:
 
 
 # -------------------------
-# 🧾 Step 2: Plan Parser
+# Step 2: Plan Parser
 # -------------------------
 def parse_plan_output(plan_text: str) -> List[Dict[str, str]]:
+    """
+    Parses the plan output from the planner agent.  Handles both JSON and text formats.
+
+    Args:
+        plan_text (str): The raw text output of the task plan.
+
+    Returns:
+        List[Dict[str, str]]: A list of dictionaries, where each dictionary represents a step in the plan.
+                                Each dictionary has "step" and "action" keys.
+    """
     try:
         return json.loads(plan_text)
     except json.JSONDecodeError:
@@ -58,9 +77,15 @@ def parse_plan_output(plan_text: str) -> List[Dict[str, str]]:
 
 
 # -------------------------
-# 🔍 Step 3: Tavily Search
+# Step 3: Tavily Search
 # -------------------------
 def search_trending_startups() -> str:
+    """
+    Performs a search using the Tavily API for trending AI startups.
+
+    Returns:
+        str: Formatted results from the search, or "No results found." if no results are returned.
+    """
     url = "https://api.tavily.com/search"
     payload = {
         "api_key": os.getenv("TAVILY_API_KEY"),
@@ -79,9 +104,18 @@ def search_trending_startups() -> str:
 
 
 # -------------------------
-# 📝 Step 4: GPT Summarizer
+# Step 4: GPT Summarizer
 # -------------------------
 def summarize_startups(raw_text: str) -> str:
+    """
+    Summarizes startup news using OpenAI's GPT model.
+
+    Args:
+        raw_text (str): The raw text of the startup news to be summarized.
+
+    Returns:
+        str: A summary of the startup news in 3 points.
+    """
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -94,9 +128,18 @@ def summarize_startups(raw_text: str) -> str:
 
 
 # -------------------------
-# 📄 Step 5: Markdown Writer
+# Step 5: Markdown Writer
 # -------------------------
 def write_markdown(summary: str) -> str:
+    """
+    Writes a markdown report to a file.
+
+    Args:
+        summary (str): The summary text to be written into the markdown file.
+
+    Returns:
+        str: A confirmation message indicating the filename of the created report.
+    """
     filename = "ai_startup_report.md"
     with open(filename, "w", encoding="utf-8") as f:
         f.write("# Top AI Startups – July 2025\n\n")
@@ -105,9 +148,19 @@ def write_markdown(summary: str) -> str:
 
 
 # -------------------------
-# 🧠 Step 6: Gemini Evaluator
+# Step 6: Gemini Evaluator
 # -------------------------
 def evaluate_with_gemini(report: str, goal: str) -> str:
+    """
+    Evaluates a report using Google's Gemini model.
+
+    Args:
+        report (str): The report to be evaluated.
+        goal (str): The original goal that the report was intended to address.
+
+    Returns:
+        str: A review of the report from the Gemini model.
+    """
     model = genai.GenerativeModel("gemini-2.0-flash")
     prompt = f"""
 You are a quality reviewer AI. Evaluate the following report based on this user goal:
@@ -124,9 +177,18 @@ Return a short review: Is it relevant, accurate, clear, and complete? Rate it 1�
 
 
 # -------------------------
-# 🔁 Step 7: Tool Registry
+# Step 7: Tool Registry
 # -------------------------
-def pick_tool(action_text: str):
+def pick_tool(action_text: str) -> str:
+    """
+    Determines which tool to use based on the action text.
+
+    Args:
+        action_text (str): The text describing the action to be performed.
+
+    Returns:
+        str: The key of the tool to use, or None if no matching tool is found.
+    """
     action_lower = action_text.lower()
     if any(kw in action_lower for kw in ["search", "find", "research", "identify"]):
         return "search"
@@ -144,9 +206,18 @@ TOOL_REGISTRY = {
 
 
 # -------------------------
-# 🚀 Step 8: Agent Runner
+# Step 8: Agent Runner
 # -------------------------
 def run_agent(goal: str) -> str:
+    """
+    Runs the agent to accomplish a given goal.
+
+    Args:
+        goal (str): The high-level goal for the agent to achieve.
+
+    Returns:
+        str: A final report, including the results and a Gemini review.
+    """
     plan_output = plan_task_with_llm(goal)
     parsed_steps = parse_plan_output(plan_output)
 
@@ -174,7 +245,7 @@ def run_agent(goal: str) -> str:
 
 
 # -------------------------
-# 🌐 Step 9: Gradio UI
+# Step 9: Gradio UI
 # -------------------------
 gr.Interface(
     fn=run_agent,
