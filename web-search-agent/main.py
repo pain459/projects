@@ -1,24 +1,23 @@
-# ================================
-# 🧠 STEP 1: Imports and Setup
-# ================================
 import os
 import json
 import re
 from typing import List, Dict
-from openai import OpenAI
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
+from openai import OpenAI
+import gradio as gr
+import requests
+import google.generativeai as genai
+
+# Load environment variables
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-# ================================
-# 🎯 STEP 2: User Goal
-# ================================
-user_goal = "Create a report summarizing the top 3 most talked-about AI startups in July 2025"
 
-# ================================
-# 🗂️ STEP 3: Planner Agent (LLM)
-# ================================
+# -------------------------
+# 🧠 Step 1: Planner Agent
+# -------------------------
 def plan_task_with_llm(goal: str) -> str:
     prompt = f"""
 You are a task planner agent. Break the following high-level goal into 3–5 clear, ordered subtasks.
@@ -32,7 +31,7 @@ Format:
 ]
 """
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "You are a helpful planner agent."},
             {"role": "user", "content": prompt}
@@ -41,12 +40,10 @@ Format:
     )
     return response.choices[0].message.content.strip()
 
-plan_output = plan_task_with_llm(user_goal)
-print("📋 Plan Output:\n", plan_output)
 
-# ================================
-# 🧾 STEP 4: Parse Plan Output
-# ================================
+# -------------------------
+# 🧾 Step 2: Plan Parser
+# -------------------------
 def parse_plan_output(plan_text: str) -> List[Dict[str, str]]:
     try:
         return json.loads(plan_text)
@@ -56,58 +53,37 @@ def parse_plan_output(plan_text: str) -> List[Dict[str, str]]:
         for line in lines:
             if re.match(r"^\d+\.", line):
                 step_num, action = line.split(".", 1)
-                steps.append({
-                    "step": step_num.strip(),
-                    "action": action.strip()
-                })
+                steps.append({"step": step_num.strip(), "action": action.strip()})
         return steps
 
-parsed_steps = parse_plan_output(plan_output)
-print("✅ Parsed Steps:\n", parsed_steps)
 
-# ================================
-# 🛠️ STEP 5: Tools + Registry
-# ================================
-# def search_trending_startups() -> str:
-#     # Static simulated result for now
-#     return """
-#     1. SynthMind – building low-latency multi-modal AI chips.
-#     2. QuantaFlow – offers self-healing infrastructure for LLMs.
-#     3. NeuralForge – language agents that build software end-to-end.
-#     """
-import requests
-from bs4 import BeautifulSoup
-
-# def search_trending_startups() -> str:
-#     url = "https://techcrunch.com/latest/"
-#     response = requests.get(url)
-#     soup = BeautifulSoup(response.text, "html.parser")
-
-#     articles = soup.select("h2.post-block__title a")[:3]
-#     results = "\n".join(f"{i+1}. {a.text.strip()}" for i, a in enumerate(articles))
-#     return results or "No results found."
-
-import requests
-
+# -------------------------
+# 🔍 Step 3: Tavily Search
+# -------------------------
 def search_trending_startups() -> str:
-    # Example using Tavily
-    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
     url = "https://api.tavily.com/search"
     payload = {
-        "api_key": TAVILY_API_KEY,
+        "api_key": os.getenv("TAVILY_API_KEY"),
         "query": "top AI startups July 2025",
         "search_depth": "basic"
     }
     response = requests.post(url, json=payload)
     data = response.json()
-    
+
     results = data.get("results", [])
-    return "\n".join(f"{i+1}. {r['title']}: {r['url']}" for i, r in enumerate(results[:3])) or "No results."
+    formatted = "\n".join(
+        f"{i+1}. {r['title']}\nURL: {r['url']}\nSnippet: {r.get('content', '')}"
+        for i, r in enumerate(results[:3])
+    )
+    return formatted or "No results found."
 
 
+# -------------------------
+# 📝 Step 4: GPT Summarizer
+# -------------------------
 def summarize_startups(raw_text: str) -> str:
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+        model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "You are a startup analyst who summarizes startup news for executive briefings."},
             {"role": "user", "content": f"Summarize the following startup news in 3 points:\n\n{raw_text}"}
@@ -116,6 +92,10 @@ def summarize_startups(raw_text: str) -> str:
     )
     return response.choices[0].message.content.strip()
 
+
+# -------------------------
+# 📄 Step 5: Markdown Writer
+# -------------------------
 def write_markdown(summary: str) -> str:
     filename = "ai_startup_report.md"
     with open(filename, "w", encoding="utf-8") as f:
@@ -124,50 +104,82 @@ def write_markdown(summary: str) -> str:
     return f"✅ Report written to `{filename}`"
 
 
+# -------------------------
+# 🧠 Step 6: Gemini Evaluator
+# -------------------------
+def evaluate_with_gemini(report: str, goal: str) -> str:
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    prompt = f"""
+You are a quality reviewer AI. Evaluate the following report based on this user goal:
+
+Goal: {goal}
+
+Report:
+{report}
+
+Return a short review: Is it relevant, accurate, clear, and complete? Rate it 1–5 and explain your reasoning.
+"""
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
+
+# -------------------------
+# 🔁 Step 7: Tool Registry
+# -------------------------
+def pick_tool(action_text: str):
+    action_lower = action_text.lower()
+    if any(kw in action_lower for kw in ["search", "find", "research", "identify"]):
+        return "search"
+    elif any(kw in action_lower for kw in ["summarize", "extract", "gather", "analyze", "review"]):
+        return "summarize"
+    elif any(kw in action_lower for kw in ["write", "report", "format", "compile"]):
+        return "write"
+    return None
+
 TOOL_REGISTRY = {
     "search": search_trending_startups,
     "summarize": summarize_startups,
     "write": write_markdown
 }
 
-# ================================
-# 🔁 STEP 6: Executor Loop
-# ================================
-def pick_tool(action_text: str):
-    action_lower = action_text.lower()
-    if any(kw in action_lower for kw in ["search", "find", "research", "identify"]):
-        return "search"
-    elif any(kw in action_lower for kw in ["summarize", "extract", "gather", "analyze"]):
-        return "summarize"
-    elif any(kw in action_lower for kw in ["write", "report", "format", "compile"]):
-        return "write"
-    elif any(kw in action_lower for kw in ["review", "edit", "finalize"]):
-        return "summarize"  # Use summarizer again or create a "review" tool if needed
-    return None
+
+# -------------------------
+# 🚀 Step 8: Agent Runner
+# -------------------------
+def run_agent(goal: str) -> str:
+    plan_output = plan_task_with_llm(goal)
+    parsed_steps = parse_plan_output(plan_output)
+
+    intermediate_memory = None
+    report_text = ""
+
+    for step in parsed_steps:
+        tool_key = pick_tool(step["action"])
+        tool_fn = TOOL_REGISTRY.get(tool_key)
+
+        if not tool_fn:
+            continue
+
+        if tool_key == "search":
+            result = tool_fn()
+        else:
+            result = tool_fn(intermediate_memory)
+
+        intermediate_memory = result
+        report_text = result
+
+    review = evaluate_with_gemini(report_text, goal)
+
+    return f"{report_text}\n\n---\n🔍 Gemini Review:\n{review}"
 
 
-intermediate_memory = None
-
-for step in parsed_steps:
-    step_id = step["step"]
-    action = step["action"]
-    print(f"\n🧭 Step {step_id}: {action}")
-
-    tool_key = pick_tool(action)
-    if not tool_key:
-        print("❌ No matching tool found.")
-        continue
-
-    tool_fn = TOOL_REGISTRY.get(tool_key)
-    if not tool_fn:
-        print("⚠️ Tool function not implemented.")
-        continue
-
-    # Call with or without memory
-    if tool_key in ["search"]:
-        result = tool_fn()
-    else:
-        result = tool_fn(intermediate_memory)
-
-    intermediate_memory = result
-    print("✅ Output:\n", result)
+# -------------------------
+# 🌐 Step 9: Gradio UI
+# -------------------------
+gr.Interface(
+    fn=run_agent,
+    inputs=gr.Textbox(label="Goal", placeholder="e.g., Summarize top AI startups in July 2025"),
+    outputs=gr.Textbox(label="Final Report with Gemini Review", lines=20),
+    title="Agentic AI Research Assistant",
+    description="Planner → Executor → Summarizer → Gemini Validator"
+).launch()
