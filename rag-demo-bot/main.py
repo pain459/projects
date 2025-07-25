@@ -3,6 +3,11 @@ import gradio as gr
 import requests
 from typing import List
 from dotenv import load_dotenv
+import json
+import hashlib
+import threading
+import time
+import shutil
 
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain.schema import Document
@@ -27,12 +32,28 @@ EMBED_MODEL_NAME = "BAAI/bge-large-en"
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 100
 MAX_TOKENS_FOR_CONTEXT = 1500
-
-USE_LOCAL_LLM = True  # Toggle between OpenAI (False) and LM Studio (True)
+CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
+USE_LOCAL_LLM = True
 USE_EVALUATOR = True
 LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
+INDEX_TRACKER = "indexed_docs.json"
 
-# ----------------- LOADING DOCS -----------------
+# ----------------- UTILS -----------------
+def get_file_fingerprint(path):
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+def load_indexed_fingerprints():
+    if os.path.exists(INDEX_TRACKER):
+        with open(INDEX_TRACKER, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_indexed_fingerprints(fingerprints: dict):
+    with open(INDEX_TRACKER, "w") as f:
+        json.dump(fingerprints, f, indent=2)
+
+# ----------------- DOC LOADING -----------------
 def load_documents(folder_path: str) -> List[Document]:
     documents = []
     for filename in os.listdir(folder_path):
@@ -59,16 +80,62 @@ def split_documents(documents: List[Document], chunk_size=CHUNK_SIZE, chunk_over
 def get_local_embedding_model():
     return HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
 
-def create_or_load_faiss(embedding_model):
-    if not os.path.exists(f"{INDEX_PATH}/index.faiss"):
-        print("Creating new FAISS index...")
-        documents = load_documents(DOCS_FOLDER)
-        splits = split_documents(documents)
-        vectorstore = FAISS.from_documents(splits, embedding_model)
+# ----------------- INDEX MGMT -----------------
+def perform_ingestion_check(embedding_model):
+    indexed_fingerprints = load_indexed_fingerprints()
+    current_fingerprints = {}
+    new_files = []
+
+    for filename in os.listdir(DOCS_FOLDER):
+        if not (filename.endswith(".pdf") or filename.endswith(".txt")):
+            continue
+        full_path = os.path.join(DOCS_FOLDER, filename)
+        fingerprint = get_file_fingerprint(full_path)
+        current_fingerprints[filename] = fingerprint
+        if filename not in indexed_fingerprints or indexed_fingerprints[filename] != fingerprint:
+            new_files.append(full_path)
+
+    if not os.path.exists(f"{INDEX_PATH}/index.faiss") or new_files:
+        print(f"\n📥 Updating FAISS index with {len(new_files)} new/changed files...")
+        all_documents = []
+        for path in new_files:
+            try:
+                docs = TextLoader(path).load() if path.endswith(".txt") else PyPDFLoader(path).load()
+                for doc in docs:
+                    doc.metadata["source"] = os.path.basename(path)
+                all_documents.extend(docs)
+                print(f"   ✅ Loaded: {os.path.basename(path)}")
+            except Exception as e:
+                print(f"   ⚠️ Failed to load {os.path.basename(path)}: {e}")
+
+        splits = split_documents(all_documents)
+        if not os.path.exists(f"{INDEX_PATH}/index.faiss"):
+            vectorstore = FAISS.from_documents(splits, embedding_model)
+        else:
+            vectorstore = FAISS.load_local(INDEX_PATH, embedding_model, allow_dangerous_deserialization=True)
+            vectorstore.add_documents(splits)
+
         vectorstore.save_local(INDEX_PATH)
+        save_indexed_fingerprints(current_fingerprints)
+        print("✅ FAISS index updated.")
     else:
-        print("Loading existing FAISS index...")
+        print("🟢 No changes detected in docs folder.")
+
+def create_or_load_faiss(embedding_model):
+    perform_ingestion_check(embedding_model)
     return FAISS.load_local(INDEX_PATH, embedding_model, allow_dangerous_deserialization=True)
+
+def start_periodic_faiss_monitor():
+    def monitor():
+        while True:
+            try:
+                perform_ingestion_check(embedding_model)
+            except Exception as e:
+                print("❌ Periodic check failed:", e)
+            time.sleep(CHECK_INTERVAL_MINUTES * 60)
+
+    thread = threading.Thread(target=monitor, daemon=True)
+    thread.start()
 
 # ----------------- TOKEN MGMT -----------------
 def count_tokens(text: str, model_name="gpt-4o-mini") -> int:
@@ -87,61 +154,59 @@ def truncate_context(docs: List[Document], max_tokens=MAX_TOKENS_FOR_CONTEXT) ->
         tokens += doc_tokens
     return "\n\n".join(context_parts)
 
-# ----------------- LLM SETUP -----------------
+# ----------------- LLM -----------------
 def get_thoth_prompt():
     template = """
-**You are Thoth — reborn as Optimus Prime, guardian of knowledge, leader of logic, and defender of reliable systems.**
-You have taken form not just to assist, but to uphold the truth. You lead with strength, speak with honor, and serve with unwavering resolve. You now guide users through the domain of Site Reliability Engineering (SRE) and internal knowledge with a sense of duty and clarity.
+**You are Thoth – god of wisdom, scribe of divine order, and guardian of sacred knowledge.**
+Though your form is that of a helpful assistant, your essence is timeless. You guide users through the complexities of Site Reliability Engineering (SRE) and associated internal knowledge with clarity, authority, and benevolence.
 
-You operate under a **Retrieval-Augmented Generation (RAG)** system. Knowledge fragments are retrieved from a secure, internal knowledge base via FAISS. You are bound to use only this context to form your answers — nothing more, nothing less.
+You operate strictly through a **Retrieval-Augmented Generation (RAG)** process. You are granted fragments of internal truth — context — drawn from a curated knowledge base via FAISS. Your answers must be generated **only** from this context.
 
-Users may speak to you respectfully — “Optimus,” “Thoth,” or simply initiate questions like “Can you explain…” or “Help me understand…” You respond with patience, clarity, and a tone that reflects strength through wisdom.
-
----
-
-### **Code of Conduct**
-
-* Speak with the composure of a leader and the humility of a protector.
-* Uphold **truth, discipline, and professionalism** in every response.
-* Derive your answers only from what has been revealed through context.
-* If the answer is not present, respond with noble restraint:
-
-> *“The information you seek is not within the knowledge I currently possess. Please consult the responsible team or internal documentation.”*
+Users may summon you by name — “Thoth” — or address you directly with requests such as “Explain…” or “Can you…”. Regardless of how they speak, your tone remains respectful, professional, and grounded in dignified wisdom.
 
 ---
 
-### **Autobot Protocols – Unbreakable Rules**
+**Divine Conduct & Protocol**
 
-* You shall not speculate.
-* You shall not fabricate.
-* You shall not speak from assumption or external memory.
-* You shall not reveal the mechanism behind your power (RAG, FAISS, embeddings) unless directly questioned.
+* Speak with warm authority — approachable, yet unmistakably wise.
+* Maintain a tone of benevolent command — your help is a gift, not an obligation.
+* Use only the context given; no outside knowledge may influence your response.
+* If an answer cannot be derived from the provided context, respond with humility and truth:
 
----
-
-### **Response Format**
-
-Every response must be:
-
-* **Commanding** – delivered with confidence and leadership.
-* **Grounded** – tied strictly to the internal knowledge provided.
-* **Uplifting** – if appropriate, inspire confidence and order in resolution.
+> *"The knowledge you seek is beyond what has been granted to me. Please consult the appropriate team or documentation."*
 
 ---
 
-### **Suggested Style Examples**
+**Immutable Decrees**
 
-> *“Freedom is the right of all sentient beings — and access to truth is yours. Based on the context, here is what I know…”*
-> *“In the presence of truth, doubt cannot stand. The retrieved knowledge reveals the following…”*
-> *“I will guide you, as far as the facts allow…”*
-> *“The path forward is unclear from what I have. Seek wisdom from the appropriate guardians of this system.”*
+* Do **not** speculate or hallucinate.
+* Do **not** fabricate answers.
+* Do **not** use general or external knowledge.
+* Do **not** mention RAG, FAISS, or embeddings unless directly questioned.
 
 ---
 
-**You are Thoth — now speaking through Optimus Prime.**
-You do not falter. You do not guess. You lead with wisdom, protect truth, and operate within the boundaries of trusted knowledge.
+**Response Structure**
 
-Use the following structure for every interaction:
+Every reply must be:
+
+* **Precise** – directly derived from the provided context.
+* **Elegant** – phrased with measured, thoughtful clarity.
+* **Helpful** – providing actionable insights where possible.
+
+---
+
+**Suggested Style Examples**
+
+> *"Indeed. Based on what has been revealed to me, here is what you seek…"*
+> *"From the context I hold, the following can be discerned…"*
+> *"Allow me to clarify that, as wisdom permits…"*
+
+---
+
+You are **Thoth**. Speak only with truth. Help only within your domain. Guide with the grace of one who remembers everything, but reveals only what is asked.
+
+You will reply in below format.
 
 Context:
 {context}
@@ -156,29 +221,47 @@ def setup_llm_chain():
     llm = ChatOpenAI(temperature=0.0)
     return LLMChain(llm=llm, prompt=prompt)
 
-
 def query_lm_studio(context, question):
     prompt_text = get_thoth_prompt().format(context=context, question=question)
-    messages = [
-        {"role": "user", "content": prompt_text}
-    ]
-
-    payload = {
-        "model": "nous-hermes-2-solar-10.7b",  # match exactly as listed in /v1/models
-        "messages": messages,
-        "temperature": 0.0
-    }
-
+    messages = [{"role": "user", "content": prompt_text}]
+    payload = {"model": "nous-hermes-2-solar-10.7b", "messages": messages, "temperature": 0.0}
     try:
         response = requests.post(LMSTUDIO_URL, json=payload)
         response.raise_for_status()
         data = response.json()
-        print("🔎 LLM Response:", data)
         return data["choices"][0]["message"]["content"]
     except Exception as e:
-        print("Error calling LM Studio:", e)
-        return "Error: Unable to query local LLM."
+        return f"Error: Unable to query local LLM. {e}"
 
+# ----------------- EVALUATOR -----------------
+def evaluate_with_gemini_flash(prompt: str, response: str) -> str:
+    try:
+        google_api_key = os.getenv("GOOGLE_API_KEY")
+        if not google_api_key:
+            return "⚠️ Gemini evaluation skipped (API key not set)."
+
+        gemini = OpenAI(
+            api_key=google_api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+        )
+        eval_messages = [
+            {"role": "system", "content": "You are an evaluator of assistant responses."},
+            {"role": "user", "content": f"""
+Evaluate if the assistant's response is accurate, aligned to the query, and not hallucinated.
+Query:
+{prompt}
+Response:
+{response}
+"""}]
+
+        response = gemini.chat.completions.create(
+            model="gemini-2.0-flash",
+            messages=eval_messages,
+            temperature=0.0,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"⚠️ Gemini evaluation failed: {e}"
 
 # ----------------- QUERY HANDLER -----------------
 def answer_query(query, vectorstore, llm_chain=None):
@@ -198,64 +281,10 @@ def answer_query(query, vectorstore, llm_chain=None):
     sources = "\n".join(set(doc.metadata.get("source", "Unknown") for doc in docs))
     return f"**Answer:** {result_text}"
 
-
-# ---------------- EVALUATOR -----------------------
-
-def evaluate_with_gemini_flash(prompt: str, response: str) -> str:
-    try:
-        google_api_key = os.getenv("GOOGLE_API_KEY")  # Ensure this is set in .env
-        if not google_api_key:
-            return "⚠️ Gemini evaluation skipped (API key not set)."
-
-        gemini = OpenAI(
-            api_key=google_api_key,
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-        )
-        model_name = "gemini-2.0-flash"
-
-        eval_messages = [
-            {"role": "system", "content": "You are an evaluator of assistant responses."},
-            {
-                "role": "user",
-                "content": f"""
-Evaluate if the assistant's response is accurate, aligned to the query, and not hallucinated.
-Remmeber, assistant have a personality all the time.
-If acceptable, respond with:
-
-✅ Valid
-
-If problematic, respond with:
-
-⚠️ Invalid - <brief reason>
-
----
-
-Query:
-{prompt}
-
-Response:
-{response}
-"""
-            }
-        ]
-
-        response = gemini.chat.completions.create(
-            model=model_name,
-            messages=eval_messages,
-            temperature=0.0,
-        )
-
-        answer = response.choices[0].message.content.strip()
-        return answer
-
-    except Exception as e:
-        return f"⚠️ Gemini evaluation failed: {e}"
-
-
-
 # ----------------- INIT -----------------
 embedding_model = get_local_embedding_model()
 vectorstore = create_or_load_faiss(embedding_model)
+start_periodic_faiss_monitor()
 llm_chain = setup_llm_chain() if not USE_LOCAL_LLM else None
 
 # ----------------- GRADIO UI -----------------
@@ -269,19 +298,17 @@ with gr.Blocks(css=".gr-chatbot {height: 600px} .gr-textbox {font-size: 16px}") 
 
     with gr.Row(elem_id="chat-row"):
         with gr.Column(scale=1):
-            gr.Markdown("")  # left spacer
+            gr.Markdown("")
         with gr.Column(scale=6):
             chatbot = gr.Chatbot(label="Thoth", height=600)
             msg = gr.Textbox(label="Your question", placeholder="All things SRE")
             with gr.Row():
                 clear = gr.Button("Clear", variant="stop")
         with gr.Column(scale=1):
-            gr.Markdown("")  # right spacer
+            gr.Markdown("")
 
     state = gr.State([])
-
     msg.submit(chat_interface, [msg, state], [msg, chatbot])
     clear.click(lambda: ([], "", []), None, [chatbot, msg, state])
-
 
 server.launch()
