@@ -17,4 +17,6 @@ dependencies = [
     "transformers", # For local LLM support (e.g., Hugging Face models) # For fast inference with local LLMs
     "accelerate",
     "google-generativeai>=0.8.5",
+    "langchain-openai>=0.3.28",
+    "langchain-huggingface>=0.3.1",
 ]
