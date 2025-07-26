@@ -187,6 +187,8 @@ def perform_ingestion_check(embedding_model):
 
         vectorstore.save_local(INDEX_PATH)
         save_indexed_fingerprints(current_fingerprints)
+        print(f"🆕 FAISS index updated. {len(new_files)} new or modified file(s) ingested: {[os.path.basename(f) for f in new_files]}")
+
     else:
         print("🟢 No changes detected in docs folder.")
 
