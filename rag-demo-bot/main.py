@@ -8,7 +8,7 @@ Features:
 - Gemini Flash evaluator integration for response validation
 - Gradio-based chat UI for interaction
 """
-
+# Core libraries
 import os
 import json
 import time
@@ -20,6 +20,7 @@ import gradio as gr
 from typing import List
 from dotenv import load_dotenv
 
+# LangChain-related libraries
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
@@ -32,7 +33,9 @@ from openai import OpenAI
 
 # ----------------- CONFIG -----------------
 
-load_dotenv()
+load_dotenv() # Load environment variables from .env file
+
+# API keys and paths
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
@@ -41,16 +44,19 @@ INDEX_PATH = "faiss_index_local"
 INDEX_TRACKER = "indexed_docs.json"
 EMBED_MODEL_NAME = "BAAI/bge-large-en"
 
+# Chunk and token configurations
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 100
 MAX_TOKENS_FOR_CONTEXT = 1500
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "5"))
 
+# Runtime flags
 USE_LOCAL_LLM = False
 USE_EVALUATOR = True
 LMSTUDIO_URL = "http://localhost:1234/v1/chat/completions"
 
 # ----------------- SHERLOCK PERSONA -----------------
+# This defines the assistant's persona. Gemini also uses this for evaluation.
 
 THOTH_PERSONA = """
 You are Sherlock Holmes – the world’s foremost consulting detective, master of deduction, and analyst of truth.
@@ -94,22 +100,26 @@ Question:
 # ----------------- UTILS -----------------
 
 def get_file_fingerprint(path: str) -> str:
+    """Generate an MD5 hash fingerprint for a given file."""
     with open(path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
 
 def load_indexed_fingerprints() -> dict:
+    """Load previously indexed file fingerprints to detect document changes."""
     if os.path.exists(INDEX_TRACKER):
         with open(INDEX_TRACKER, "r") as f:
             return json.load(f)
     return {}
 
 def save_indexed_fingerprints(fingerprints: dict):
+    """Save updated file fingerprints to track processed documents."""
     with open(INDEX_TRACKER, "w") as f:
         json.dump(fingerprints, f, indent=2)
 
 # ----------------- DOCUMENTS -----------------
 
 def load_documents(folder_path: str) -> List[Document]:
+    """Load all .pdf and .txt documents from the specified folder."""
     documents = []
     for filename in os.listdir(folder_path):
         file_path = os.path.join(folder_path, filename)
@@ -125,6 +135,7 @@ def load_documents(folder_path: str) -> List[Document]:
     return documents
 
 def split_documents(documents: List[Document], chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP) -> List[Document]:
+    """Split documents into chunks for embedding and vector search."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -133,11 +144,16 @@ def split_documents(documents: List[Document], chunk_size=CHUNK_SIZE, chunk_over
     return splitter.split_documents(documents)
 
 def get_local_embedding_model():
+    """Instantiate and return the HuggingFace embedding model."""
     return HuggingFaceEmbeddings(model_name=EMBED_MODEL_NAME)
 
 # ----------------- INDEX -----------------
 
 def perform_ingestion_check(embedding_model):
+    """
+    Detects new or changed files in the docs folder and updates the FAISS index accordingly.
+    Reuses existing index if no changes are found.
+    """
     indexed_fingerprints = load_indexed_fingerprints()
     current_fingerprints = {}
     new_files = []
@@ -175,10 +191,18 @@ def perform_ingestion_check(embedding_model):
         print("🟢 No changes detected in docs folder.")
 
 def create_or_load_faiss(embedding_model):
+    """
+    Ensure FAISS index exists or is updated with new documents,
+    and return the loaded FAISS vector store.
+    """
     perform_ingestion_check(embedding_model)
     return FAISS.load_local(INDEX_PATH, embedding_model, allow_dangerous_deserialization=True)
 
 def start_periodic_faiss_monitor():
+    """
+    Start a background thread that checks the docs folder periodically for new/changed files
+    and updates the FAISS index accordingly.
+    """
     def monitor():
         while True:
             try:
@@ -193,6 +217,10 @@ def start_periodic_faiss_monitor():
 # ----------------- TOKENS -----------------
 
 def truncate_context(docs: List[Document], max_tokens=MAX_TOKENS_FOR_CONTEXT) -> str:
+    """
+    Reduce the total document content to fit within a given token limit,
+    preserving as much relevant context as possible.
+    """
     enc = tiktoken.encoding_for_model("gpt-4")
     tokens = 0
     context_parts = []
@@ -207,6 +235,9 @@ def truncate_context(docs: List[Document], max_tokens=MAX_TOKENS_FOR_CONTEXT) ->
 # ----------------- LLM -----------------
 
 def setup_llm_chain():
+    """
+    Define the prompt template and initialize the OpenAI chat chain using LangChain.
+    """
     prompt = ChatPromptTemplate.from_messages([
         ("system", THOTH_PERSONA),
         ("human", "{question}")
@@ -214,6 +245,9 @@ def setup_llm_chain():
     return prompt | ChatOpenAI(temperature=0.0)
 
 def query_lm_studio(context, question):
+    """
+    Query the local LLM (LM Studio) with a formatted prompt.
+    """
     prompt_text = THOTH_PERSONA.format(context=context, question=question)
     messages = [{"role": "user", "content": prompt_text}]
     payload = {"model": "nous-hermes-2-solar-10.7b", "messages": messages, "temperature": 0.0}
@@ -227,7 +261,9 @@ def query_lm_studio(context, question):
 # ----------------- EVALUATION -----------------
 
 def needs_improvement(evaluation: str) -> bool:
-    """Determines if Gemini feedback requests a revision."""
+    """
+    Determine if Gemini suggests the response needs to be improved based on feedback keywords.
+    """
     lowered = evaluation.lower()
     return any(phrase in lowered for phrase in [
         "not accurate", "hallucinated", "needs improvement", "incorrect", "incomplete", "unsatisfactory", "off-topic"
@@ -235,6 +271,9 @@ def needs_improvement(evaluation: str) -> bool:
 
 
 def get_feedback_and_rewrite(query: str, original_response: str) -> str:
+    """
+    Use Gemini to rewrite an unsatisfactory response while adhering to the assistant's persona.
+    """
     try:
         google_api_key = os.getenv("GOOGLE_API_KEY")
         if not google_api_key:
@@ -286,6 +325,9 @@ Provide a corrected version.
 
 
 def evaluate_with_gemini_flash(prompt: str, response: str) -> str:
+    """
+    Use Gemini Flash to evaluate if the assistant's response adheres to its persona and factual boundaries.
+    """
     try:
         google_api_key = os.getenv("GOOGLE_API_KEY")
         if not google_api_key:
@@ -330,6 +372,10 @@ Be concise. State if the answer is acceptable. If not, explain why.
 # ----------------- QUERY HANDLER -----------------
 
 def answer_query(query, vectorstore):
+    """
+    Execute the full RAG query-response-evaluation loop.
+    Includes retry logic with Gemini feedback to improve unsatisfactory responses.
+    """
     docs = vectorstore.similarity_search("query: " + query, k=10)
     context = truncate_context(docs)
 
@@ -370,6 +416,7 @@ def answer_query(query, vectorstore):
 
 # ----------------- INIT -----------------
 
+# Load embedding model and FAISS index, start monitor thread
 embedding_model = get_local_embedding_model()
 vectorstore = create_or_load_faiss(embedding_model)
 start_periodic_faiss_monitor()
@@ -377,10 +424,14 @@ start_periodic_faiss_monitor()
 # ----------------- UI -----------------
 
 def chat_interface(message, chat_history):
+    """
+    Gradio UI callback that handles user input and appends to chat history.
+    """
     response = answer_query(message, vectorstore)
     chat_history.append((message, response))
     return "", chat_history
 
+# Gradio blocks layout definition
 with gr.Blocks(css=".gr-chatbot {height: 600px} .gr-textbox {font-size: 16px}") as server:
     gr.Markdown("## 🤖 THOTH - SRE bot")
 
@@ -397,4 +448,5 @@ with gr.Blocks(css=".gr-chatbot {height: 600px} .gr-textbox {font-size: 16px}") 
     msg.submit(chat_interface, [msg, state], [msg, chatbot])
     clear.click(lambda: ([], "", []), None, [chatbot, msg, state])
 
-server.launch()
+# Start the Gradio app
+server.launch()  # just add server=True in Launch if you want to expose the app to internet. Read gradio docs for more info.
