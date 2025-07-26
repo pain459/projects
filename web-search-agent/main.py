@@ -89,7 +89,7 @@ def search_trending_startups() -> str:
     url = "https://api.tavily.com/search"
     payload = {
         "api_key": os.getenv("TAVILY_API_KEY"),
-        "query": "top AI startups July 2025",
+        "query": "Give the top cutting edge AI tech details in industry right now.",
         "search_depth": "basic"
     }
     response = requests.post(url, json=payload)
@@ -209,20 +209,11 @@ TOOL_REGISTRY = {
 # Step 8: Agent Runner
 # -------------------------
 def run_agent(goal: str) -> str:
-    """
-    Runs the agent to accomplish a given goal.
-
-    Args:
-        goal (str): The high-level goal for the agent to achieve.
-
-    Returns:
-        str: A final report, including the results and a Gemini review.
-    """
     plan_output = plan_task_with_llm(goal)
     parsed_steps = parse_plan_output(plan_output)
 
     intermediate_memory = None
-    report_text = ""
+    initial_report = ""
 
     for step in parsed_steps:
         tool_key = pick_tool(step["action"])
@@ -237,15 +228,61 @@ def run_agent(goal: str) -> str:
             result = tool_fn(intermediate_memory)
 
         intermediate_memory = result
-        report_text = result
+        initial_report = result
 
-    review = evaluate_with_gemini(report_text, goal)
+    # Gemini critiques the report
+    critique = critique_with_gemini(initial_report, goal)
 
-    return f"{report_text}\n\n---\n🔍 Gemini Review:\n{review}"
+    # GPT rewrites the report using feedback
+    improved_report = improve_with_gpt(initial_report, critique, goal)
+
+    return f"""
+📄 Improved Report:
+{improved_report}
+
+---
+
+📝 Gemini Feedback:
+{critique}
+"""
+
 
 
 # -------------------------
-# Step 9: Gradio UI
+# Step 9: Gemini Critic
+# -------------------------
+def critique_with_gemini(report: str, goal: str) -> str:
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    prompt = f"""
+You are a critical reviewer AI. The following report was generated for this user goal:
+
+Goal: {goal}
+
+Report:
+{report}
+
+Identify any inaccuracies, lack of clarity, missed points, or improvements needed. Provide clear bullet-point feedback.
+"""
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
+# -------------------------
+# Step 9: Improve GPT
+# -------------------------
+def improve_with_gpt(report: str, feedback: str, goal: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are an assistant improving reports based on expert feedback."},
+            {"role": "user", "content": f"Improve the following report for the goal: {goal}\n\nReport:\n{report}\n\nFeedback from reviewer:\n{feedback}"}
+        ],
+        temperature=0.6
+    )
+    return response.choices[0].message.content.strip()
+
+
+# -------------------------
+# Step 10: Gradio UI
 # -------------------------
 gr.Interface(
     fn=run_agent,
