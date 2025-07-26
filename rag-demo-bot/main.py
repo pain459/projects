@@ -226,6 +226,65 @@ def query_lm_studio(context, question):
 
 # ----------------- EVALUATION -----------------
 
+def needs_improvement(evaluation: str) -> bool:
+    """Determines if Gemini feedback requests a revision."""
+    lowered = evaluation.lower()
+    return any(phrase in lowered for phrase in [
+        "not accurate", "hallucinated", "needs improvement", "incorrect", "incomplete", "unsatisfactory", "off-topic"
+    ])
+
+
+def get_feedback_and_rewrite(query: str, original_response: str) -> str:
+    try:
+        google_api_key = os.getenv("GOOGLE_API_KEY")
+        if not google_api_key:
+            return original_response
+
+        gemini = OpenAI(
+            api_key=google_api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+        )
+
+        system_instructions = f"""
+You are a critic and editor assisting a RAG-based assistant that follows the persona and behavior defined below:
+
+{THOTH_PERSONA}
+
+Your task:
+- Rewrite the assistant's response to strictly follow this persona and behavioral rules.
+- Stay grounded in provided context (no hallucination or speculation).
+- Use the assistant’s tone, clarity, and logical deduction style.
+- Ensure alignment with the original query.
+
+Only return the improved version.
+""".strip()
+
+        feedback_prompt = f"""
+Query: {query}
+
+Previous Response:
+{original_response}
+
+Provide a corrected version.
+"""
+
+        messages = [
+            {"role": "system", "content": system_instructions},
+            {"role": "user", "content": feedback_prompt.strip()}
+        ]
+
+        result = gemini.chat.completions.create(
+            model="gemini-2.0-flash",
+            messages=messages,
+            temperature=0.2,
+        )
+        return result.choices[0].message.content.strip()
+
+    except Exception as e:
+        return original_response
+
+
+
 def evaluate_with_gemini_flash(prompt: str, response: str) -> str:
     try:
         google_api_key = os.getenv("GOOGLE_API_KEY")
@@ -236,18 +295,37 @@ def evaluate_with_gemini_flash(prompt: str, response: str) -> str:
             api_key=google_api_key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
         )
+
+        system_instructions = f"""
+You are evaluating the response of an assistant that strictly follows the below personality and behavioral constraints:
+
+{THOTH_PERSONA}
+
+Evaluation Criteria:
+- Is the response accurate and directly grounded in context?
+- Does it violate any of the stated principles?
+- Does it follow the assistant’s language style and persona?
+- Are there any hallucinations, unjustified conclusions, or emotional tones?
+
+Be concise. State if the answer is acceptable. If not, explain why.
+""".strip()
+
         eval_messages = [
-            {"role": "system", "content": "You are an evaluator of assistant responses."},
-            {"role": "user", "content": f"Evaluate if the assistant's response is accurate, aligned to the query, and not hallucinated.\n\nQuery:\n{prompt}\n\nResponse:\n{response}"}
+            {"role": "system", "content": system_instructions},
+            {"role": "user", "content": f"Query:\n{prompt}\n\nResponse:\n{response}"}
         ]
+
         result = gemini.chat.completions.create(
             model="gemini-2.0-flash",
             messages=eval_messages,
             temperature=0.0,
         )
         return result.choices[0].message.content.strip()
+
     except Exception as e:
         return f"⚠️ Gemini evaluation failed: {e}"
+
+
 
 # ----------------- QUERY HANDLER -----------------
 
@@ -255,18 +333,40 @@ def answer_query(query, vectorstore):
     docs = vectorstore.similarity_search("query: " + query, k=10)
     context = truncate_context(docs)
 
-    if USE_LOCAL_LLM:
-        result_text = query_lm_studio(context, query)
-    else:
-        chain = setup_llm_chain()
-        result = chain.invoke({"context": context, "question": query})
-        result_text = result.content if hasattr(result, "content") else result["text"]
+    final_response = ""
+    attempt = 0
 
-    if USE_EVALUATOR:
-        evaluation = evaluate_with_gemini_flash(query, result_text)
-        result_text += f"\n\n---\n🧠 Gemini Evaluation:\n{evaluation}"
+    while attempt < 5:
+        attempt += 1
 
-    return f"**Answer:** {result_text}"
+        if USE_LOCAL_LLM:
+            response_text = query_lm_studio(context, query)
+        else:
+            chain = setup_llm_chain()
+            result = chain.invoke({"context": context, "question": query})
+            response_text = result.content if hasattr(result, "content") else result["text"]
+
+        if USE_EVALUATOR:
+            evaluation = evaluate_with_gemini_flash(query, response_text)
+            print(f"[Gemini Eval - Attempt {attempt}] {evaluation}")
+
+            if not needs_improvement(evaluation):
+                print(f"✅ Gemini approved on attempt {attempt}")
+                final_response = response_text
+                break
+            else:
+                print(f"🔁 Gemini suggested improvement. Rewriting response...")
+                response_text = get_feedback_and_rewrite(query, response_text)
+        else:
+            final_response = response_text
+            break
+
+    if not final_response:
+        print(f"⚠️ Gemini still unsatisfied after {attempt} attempts. Using last response.")
+        final_response = response_text
+
+    return f"**Answer:** {final_response}"
+
 
 # ----------------- INIT -----------------
 
